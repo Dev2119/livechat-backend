@@ -1,68 +1,46 @@
-const express = require("express");
-const http = require("http");
-const { Server } = require("socket.io");
-const cors = require("cors");
-const geoip = require("geoip-lite");
+import express from "express";
+import http from "http";
+import { Server } from "socket.io";
+import cors from "cors";
 
 const app = express();
 app.use(cors());
 
 const server = http.createServer(app);
+
 const io = new Server(server, {
-  cors: { origin: "*" }
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
 });
 
+/* ================= STORAGE ================= */
 const chats = new Map();
+const userSockets = new Map();
 
+/* ================= SOCKET ================= */
 io.on("connection", (socket) => {
-  /* ================= START CHAT ================= */
+  console.log("🔌 Connected:", socket.id);
+
   socket.on("start_chat", ({ userId, name }) => {
-    if (!userId) return;
+    userSockets.set(userId, socket.id);
 
-    let chat = chats.get(userId);
-
-    if (!chat) {
-      chat = {
+    if (!chats.has(userId)) {
+      chats.set(userId, {
         userId,
-        socketId: socket.id,
-        user: { name: name || "Guest" },
+        user: { name },
         messages: [],
-        status: "online",
-        lastSeen: null,
-        page: "",
-        device: "",
-        country: ""
-      };
-      chats.set(userId, chat);
+        status: "online"
+      });
     } else {
-      chat.socketId = socket.id;
-      chat.status = "online";
+      chats.get(userId).status = "online";
     }
 
-    socket.emit("chat_history", chat.messages);
-    io.emit("chat_list", [...chats.values()]);
+    socket.join(userId);
+    io.to("agents").emit("chat_list", [...chats.values()]);
   });
 
-  /* ================= USER MESSAGE ================= */
-  socket.on("user_message", (text) => {
-    const chat = [...chats.values()].find(c => c.socketId === socket.id);
-    if (!chat) return;
-
-    chat.messages.push({ sender: "user", text });
-    io.emit("chat_list", [...chats.values()]);
-  });
-
-  /* ================= AGENT MESSAGE ================= */
-  socket.on("agent_message", ({ userId, text }) => {
-    const chat = chats.get(userId);
-    if (!chat) return;
-
-    chat.messages.push({ sender: "agent", text });
-    io.to(chat.socketId).emit("agent_reply", text);
-    io.emit("chat_list", [...chats.values()]);
-  });
-
-  /* ================= USER ACTIVITY ================= */
   socket.on("user_activity", ({ userId, page, device }) => {
     const chat = chats.get(userId);
     if (!chat) return;
@@ -70,37 +48,54 @@ io.on("connection", (socket) => {
     chat.page = page;
     chat.device = device;
 
-    const ip =
-      socket.handshake.headers["x-forwarded-for"]?.split(",")[0] ||
-      socket.handshake.address;
-
-    const geo = geoip.lookup(ip);
-    chat.country = geo?.country || "Unknown";
-
-    io.emit("chat_list", [...chats.values()]);
+    io.to("agents").emit("chat_list", [...chats.values()]);
   });
 
-  /* ================= DISCONNECT ================= */
+  socket.on("user_message", ({ userId, text }) => {
+    const chat = chats.get(userId);
+    if (!chat) return;
+
+    const message = { sender: "user", text };
+    chat.messages.push(message);
+
+    io.to("agents").emit("new_message", { userId, message });
+  });
+
+  socket.on("agent_join", () => {
+    socket.join("agents");
+    socket.emit("chat_list", [...chats.values()]);
+  });
+
+  socket.on("agent_message", ({ userId, text }) => {
+    const chat = chats.get(userId);
+    if (!chat) return;
+
+    const message = { sender: "agent", text };
+    chat.messages.push(message);
+
+    const userSocketId = userSockets.get(userId);
+    if (userSocketId) {
+      io.to(userSocketId).emit("agent_reply", text);
+    }
+
+    io.to("agents").emit("new_message", { userId, message });
+  });
+
   socket.on("disconnect", () => {
-    for (const chat of chats.values()) {
-      if (chat.socketId === socket.id) {
-        chat.status = "offline";
-        chat.lastSeen = Date.now();
-        io.emit("chat_list", [...chats.values()]);
+    for (const [userId, sid] of userSockets.entries()) {
+      if (sid === socket.id) {
+        const chat = chats.get(userId);
+        if (chat) chat.status = "offline";
+        userSockets.delete(userId);
+        io.to("agents").emit("chat_list", [...chats.values()]);
         break;
       }
     }
   });
-
-  socket.on("delete_chat", (userId) => {
-    chats.delete(userId);
-    io.emit("chat_list", [...chats.values()]);
-  });
 });
 
-/* ✅ USE RAILWAY PORT */
-const PORT = process.env.PORT || 4000;
-
+/* ================= START ================= */
+const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
   console.log(`✅ LiveChat server running on port ${PORT}`);
 });
