@@ -98,6 +98,9 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(4000, () =>
-  console.log("✅ LiveChat server running on http://localhost:4000")
-);
+/* ✅ USE RAILWAY PORT */
+const PORT = process.env.PORT || 4000;
+
+server.listen(PORT, () => {
+  console.log(`✅ LiveChat server running on port ${PORT}`);
+});
